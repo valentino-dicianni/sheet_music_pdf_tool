@@ -1,0 +1,6 @@
+flask
+gunicorn
+pypdfium2
+pillow
+numpy
+pytesseract
