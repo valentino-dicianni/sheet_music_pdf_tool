@@ -7,10 +7,11 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 NAME=sheetbot
+need_env() { [ -f .env ] || { echo "error: .env not found (cp .env.example .env and set TELEGRAM_BOT_TOKEN)" >&2; exit 1; }; }
 
 case "${1:-start}" in
   start)
-    [ -f .env ] || { echo "error: .env not found (cp .env.example .env and set TELEGRAM_BOT_TOKEN)" >&2; exit 1; }
+    need_env
     docker build -t "$NAME" .
     docker rm -f "$NAME" >/dev/null 2>&1 || true
     docker run -d --name "$NAME" --restart unless-stopped --env-file .env "$NAME"

@@ -13,8 +13,8 @@ from PySide6.QtWidgets import (
 
 from ..names import clean_name
 from ..parts import (
-    NEW_PART, Section, analyze, coverage, export_sections, format_ranges, halved_path, landscape_pages,
-    merge_with_next, move_pages, parse_pages, ranges, split_landscape, split_section, unassigned_pages,
+    DELETE, NEW_PART, Section, analyze, apply_move, coverage, export_sections, format_ranges, halved_path, landscape_pages,
+    merge_with_next, parse_pages, ranges, split_landscape, split_section, unassigned_pages,
 )
 from .groupmap import MapView
 from .jobs import Jobs
@@ -29,7 +29,8 @@ class PartsTab(QWidget):
         self.sections: list[Section] = []
         self.npages = 0
         self._loading = False
-        self._undo: list[list[tuple]] = []
+        self._undo: list[tuple[list[tuple], set[int]]] = []
+        self.deleted: set[int] = set()              # pages removed on purpose (blank, unused): not exported, not "missing"
 
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 14, 18, 14)
@@ -114,6 +115,7 @@ class PartsTab(QWidget):
         self.map.move_requested.connect(self.move_pages)
         self.map.rename_requested.connect(self.rename_section)
         self.map.picked.connect(self.map_picked)
+        self.map.delete_requested.connect(lambda pages: self.move_pages(pages, DELETE, -1))
         self.views.addWidget(self.map)
         self.views.addWidget(list_page)
         ll.addWidget(self.views, 1)
@@ -222,6 +224,7 @@ class PartsTab(QWidget):
         self.title.setText(clean_name(title) if title else path.stem.removesuffix("_A4"))
         self.sections = sections
         self._undo.clear()
+        self.deleted.clear()
         self.progress.setVisible(False)
         self.analyze_btn.setEnabled(True)
         self.export_btn.setEnabled(True)
@@ -239,7 +242,8 @@ class PartsTab(QWidget):
     def refresh(self, select=None):
         """Rebuild the table: sections plus red rows for pages that are in no section."""
         self.sections.sort(key=lambda s: (s.start, s.end))
-        missing, dup = coverage(self.sections, self.npages)
+        missing = ranges(unassigned_pages(self.sections, self.npages, self.deleted))
+        dup = coverage(self.sections, self.npages)[1]
         rows = [(s.start, 0, s) for s in self.sections] + [(a, 1, (a, b)) for a, b in missing]
         rows.sort(key=lambda r: (r[0], r[1]))
         self._loading = True
@@ -278,14 +282,15 @@ class PartsTab(QWidget):
         elif dup:
             set_chip(self.cover, f"Pages in two files: {format_ranges(dup)}", WARN)
         elif self.sections:
-            set_chip(self.cover, f"✓ All {self.npages} pages assigned", OK)
+            gone = f" ({len(self.deleted)} deleted)" if self.deleted else ""
+            set_chip(self.cover, f"✓ All {self.npages - len(self.deleted)} pages assigned{gone}", OK)
         else:
             set_chip(self.cover, "", OK)
         if sel_row is not None:
             self.table.selectRow(sel_row)
             self.table.scrollToItem(self.table.item(sel_row, 0))
         sec = select if isinstance(select, Section) else None
-        self.map.set_data(self.input.text().strip(), self.sections, self.npages, sec)
+        self.map.set_data(self.input.text().strip(), self.sections, self.npages, sec, deleted=self.deleted)
         if self.views.currentIndex() == 0:
             self._show(sec)
         else:
@@ -326,7 +331,10 @@ class PartsTab(QWidget):
     # ---- map edits
     def map_picked(self, sec, page):
         if sec is None:                             # the "not in any file" card
-            self.preview.show_pages(self.input.text().strip(), unassigned_pages(self.sections, self.npages), page)
+            self.preview.show_pages(self.input.text().strip(),
+                                    unassigned_pages(self.sections, self.npages, self.deleted), page)
+        elif sec == DELETE:                         # the "deleted pages" card
+            self.preview.show_pages(self.input.text().strip(), sorted(self.deleted), page)
         else:
             self._show(sec, page)
 
@@ -338,14 +346,15 @@ class PartsTab(QWidget):
 
     def _remember(self) -> None:
         """Snapshot the grouping before a manual change (for Ctrl+Z)."""
-        self._undo.append([(s, s.name, s.page_list()) for s in self.sections])
+        self._undo.append(([(s, s.name, s.page_list()) for s in self.sections], set(self.deleted)))
         del self._undo[:-50]
 
     def undo(self):
         if not self._undo or self.jobs.busy:
             return
         self.sections = []
-        for sec, name, pages in self._undo.pop():
+        snapshot, self.deleted = self._undo.pop()
+        for sec, name, pages in snapshot:
             sec.name = name
             sec.set_pages(pages)
             self.sections.append(sec)
@@ -358,12 +367,15 @@ class PartsTab(QWidget):
         if not moving:
             return
         self._remember()
-        select = move_pages(self.sections, moving, target, row)
-        self.status.setText(f"Moved {len(moving)} page{'s' if len(moving) != 1 else ''}.")
+        select = apply_move(self.sections, self.deleted, moving, target, row)
+        many = f"{len(moving)} page{'s' if len(moving) != 1 else ''}"
+        self.status.setText(f"Deleted {many} (Ctrl+Z undoes; drag them back from “Deleted pages”)." if target == DELETE
+                            else f"Moved {many}.")
 
         def apply():
             self.refresh(select=select)
-            self.map.flash_pages(moving)
+            if target != DELETE:
+                self.map.flash_pages(moving)
             if target == NEW_PART:
                 self.map.edit_name(select)
         QTimer.singleShot(0, apply)                 # not while the drag that triggered this is still running
@@ -434,7 +446,7 @@ class PartsTab(QWidget):
     def export(self):
         if not self.sections:
             return
-        missing, _ = coverage(self.sections, self.npages)
+        missing = ranges(unassigned_pages(self.sections, self.npages, self.deleted))
         if missing:
             box = QMessageBox(QMessageBox.Warning, "Score & Parts", "Some pages are not in any file", parent=self)
             box.setInformativeText(f"Pages {format_ranges(missing)} are not assigned to any part "

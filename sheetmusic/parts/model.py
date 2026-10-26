@@ -12,7 +12,7 @@ class PageInfo:
     title_text: str = ""          # big title found on this page ("" if none)
     title_instrument: str = ""    # instrument printed next to the title (title pages)
     header_instrument: str = ""   # instrument centered at the top (continuation pages)
-    margin_labels: int = 0        # text tokens in the left margin (staff names on score pages)
+    margin_instruments: int = 0   # instrument names / abbreviations in the left margin (staff labels of a score)
 
 
 @dataclass
@@ -25,6 +25,8 @@ class Section:
     candidates: list[str] = field(default_factory=list)   # title-page guess + headers (x2)
     headers: list[str] = field(default_factory=list)      # centered instrument headers
     order: list[int] | None = None  # explicit pages in output order, once pages were moved by hand
+    inferred: bool = False        # started because parts are evenly spaced, not because a title was read
+    titled: bool = False          # opened by its own title page (not by a leftover page or a header change)
 
     def page_list(self) -> list[int]:
         """0-based pages of this section in output order."""

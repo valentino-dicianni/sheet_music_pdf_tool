@@ -5,6 +5,7 @@ import re
 from .model import Section, coverage
 
 NEW_PART = "new"        # `move_pages` target that creates a section
+DELETE = "delete"       # `apply_move` target: pages that are not wanted (blank, unused); not exported, not "missing"
 _PAGES_RE = re.compile(r"^\s*(\d+)\s*(?:[-–]\s*(\d+))?\s*$")
 
 
@@ -22,9 +23,22 @@ def parse_pages(text: str, npages: int) -> list[int] | None:
     return list(dict.fromkeys(pages)) or None
 
 
-def unassigned_pages(sections: list[Section], npages: int) -> list[int]:
+def unassigned_pages(sections: list[Section], npages: int, deleted=()) -> list[int]:
+    """Pages in no section that were not deleted on purpose: the ones to look at."""
     missing, _ = coverage(sections, npages)
-    return [p for a, b in missing for p in range(a, b + 1)]
+    return [p for a, b in missing for p in range(a, b + 1) if p not in deleted]
+
+
+def apply_move(sections: list[Section], deleted: set[int], pages: list[int], target, row: int = -1) -> Section | None:
+    """`move_pages` that also knows deleted pages: `DELETE` takes the pages out of every section and remembers them in
+    `deleted`; moving them to a section (or a new one) brings them back. Edits both in place."""
+    moving = list(dict.fromkeys(pages))
+    if target == DELETE:
+        move_pages(sections, moving, None)
+        deleted.update(moving)
+        return None
+    deleted.difference_update(moving)
+    return move_pages(sections, moving, target, row)
 
 
 def move_pages(sections: list[Section], pages: list[int], target, row: int = -1) -> Section | None:

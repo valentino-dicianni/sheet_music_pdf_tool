@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QPushButton, QScrollArea, QToolTip, QVBoxLayout, QWidget,
 )
 
-from ..parts import NEW_PART, coverage
+from ..parts import DELETE, NEW_PART, coverage
 from .jobs import Jobs
 from .theme import ACCENT, DANGER, OK, WARN
 from .thumbs import THUMB_H, THUMB_W, ThumbCache
@@ -75,6 +75,7 @@ class GroupList(QListWidget):
 
     dropped = Signal(object, int)               # pages, insert row (-1: at the end)
     drag_state = Signal(bool)
+    delete_requested = Signal()                 # Delete / Backspace pressed with pages selected
     hovered = Signal(bool)                      # a drag of pages is over this list
     menu_requested = Signal(object)
 
@@ -120,6 +121,12 @@ class GroupList(QListWidget):
 
     def selected_pages(self) -> list[int]:
         return sorted(i.data(Qt.UserRole) for i in self.selectedItems())
+
+    def keyPressEvent(self, ev):
+        if ev.key() in (Qt.Key_Delete, Qt.Key_Backspace) and self.selectedItems():
+            self.delete_requested.emit()
+            return
+        super().keyPressEvent(ev)
 
     # ---- height follows the number of wrapped rows (no inner scrolling)
     def resizeEvent(self, ev):
@@ -428,6 +435,7 @@ class MapView(QWidget):
 
     move_requested = Signal(object, object, int)     # pages, target (Section | None | NEW_PART), row
     rename_requested = Signal(object, str)           # section, new name
+    delete_requested = Signal(object)                # pages the user wants gone (Delete key / menu)
     picked = Signal(object, object)                  # section | None (unassigned) | range tuple, page | None
 
     def __init__(self, jobs: "Jobs"):
@@ -443,6 +451,9 @@ class MapView(QWidget):
         self._collapsed: dict[int, bool] = {}           # id(section) -> collapsed (kept across rebuilds)
         self._page_card: dict[int, GroupCard] = {}
         self._flash_anim: QVariantAnimation | None = None
+        self._hold: int | None = None                   # scroll position to keep while the rebuilt cards find their size
+        self._reveal_next = False                       # the next move came from the menu: the target may be off-screen
+        self._after_delete: tuple | None = None         # (section, row): select the page that moves up into the gap
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -450,7 +461,8 @@ class MapView(QWidget):
         self.strip = OverviewStrip()
         self.strip.clicked.connect(self.reveal_page)
         lay.addWidget(self.strip)
-        self.hint = QLabel("Drag pages between parts. Ctrl / Shift-click selects several; right-click for more; Ctrl+Z undoes.",
+        self.hint = QLabel("Drag pages between parts. Ctrl / Shift-click selects several; Del removes pages (blank or unused); "
+                           "right-click for more; Ctrl+Z undoes.",
                            objectName="muted")
         lay.addWidget(self.hint)
         self.area = QScrollArea(objectName="preview")
@@ -467,13 +479,27 @@ class MapView(QWidget):
         self._visible_timer = QTimer(self, singleShot=True, interval=120)
         self._visible_timer.timeout.connect(self._prioritize_visible)
         self.area.verticalScrollBar().valueChanged.connect(lambda _: self._visible_timer.start())
+        self.area.verticalScrollBar().rangeChanged.connect(self._keep_scroll)
+        self._release = QTimer(self, singleShot=True, interval=500)     # fires once the layout has been quiet this long
+        self._release.timeout.connect(lambda: setattr(self, "_hold", None))
 
     # ---- data
-    def set_data(self, path: str, sections: list, npages: int, select=None) -> None:
+    def _keep_scroll(self, _lo: int, hi: int) -> None:
+        """The cards are rebuilt after every edit and the scroll range collapses and grows back while they are laid
+        out: put the view back where the user was (until the layout has settled, or they scroll themselves)."""
+        if self._hold is not None:
+            self.area.verticalScrollBar().setValue(min(self._hold, hi))
+            self._release.start()                       # still growing: keep holding until it has been quiet for a while
+
+    def set_data(self, path: str, sections: list, npages: int, select=None, reveal: bool = False, deleted=()) -> None:
+        sb = self.area.verticalScrollBar()
+        if self._hold is None:
+            self._hold = sb.value()                     # first rebuild of a burst: remember where we are
+        self._release.start()
         self.thumbs.set_path(path)
         sections = sorted(sections, key=lambda s: (s.start, s.end))
         missing, _ = coverage(sections, npages)
-        un_pages = [p for a, b in missing for p in range(a, b + 1)]
+        un_pages = [p for a, b in missing for p in range(a, b + 1) if p not in deleted]
 
         if self._flash_anim is not None:
             self._flash_anim.stop()
@@ -490,12 +516,14 @@ class MapView(QWidget):
             groups.append((None, "Not in any file", QColor(DANGER), un_pages))
         for k, s in enumerate(sections):
             groups.append((s, s.name, QColor(PART_COLORS[k % len(PART_COLORS)]), s.page_list()))
+        if deleted:
+            groups.append((DELETE, "Deleted pages", QColor("#8a9099"), sorted(deleted)))
         for sec, name, color, pages in groups:
             for p in pages:
                 if p < npages:
                     self._owner[p] = (name, color)
-            card = GroupCard(name, color, editable=sec is not None,
-                             warn=sec is not None and name.startswith("Part "))
+            card = GroupCard(name, color, editable=sec is not None and sec != DELETE,
+                             warn=sec is not None and sec != DELETE and name.startswith("Part "))
             card.count.setText(f"{len(pages)} page{'s' if len(pages) != 1 else ''}")
             for p in pages:
                 it = QListWidgetItem(QIcon(self.thumbs.pix.get(p, self._placeholder)), str(p + 1))
@@ -507,6 +535,8 @@ class MapView(QWidget):
             card.list.itemSelectionChanged.connect(lambda c=card, s=sec: self._selection(c, s))
             card.list.dropped.connect(lambda pg, row, s=sec: self.move_requested.emit(pg, s, row))
             card.dropped.connect(lambda pg, row, s=sec: self.move_requested.emit(pg, s, row))
+            if sec != DELETE:
+                card.list.delete_requested.connect(lambda c=card, s=sec: self._delete_selected(c, s))
             card.list.drag_state.connect(self._drag_state)
             card.list.menu_requested.connect(lambda pos, c=card, s=sec: self._menu(c, s, pos))
             card.header_clicked.connect(lambda c=card, s=sec: self._header(c, s))
@@ -516,7 +546,7 @@ class MapView(QWidget):
                 f.setBold(True)
                 card.name.setFont(f)
             if sec is not None:
-                collapsed = self._collapsed.setdefault(id(sec), sec.is_score and len(pages) > 24)
+                collapsed = self._collapsed.setdefault(id(sec), (sec.is_score and len(pages) > 24) if sec != DELETE else True)
                 card.set_collapsed(collapsed)
                 card.collapsed_changed.connect(lambda on, s=sec: self._collapsed.__setitem__(id(s), on))
             self.vbox.addWidget(card)
@@ -529,10 +559,32 @@ class MapView(QWidget):
         self.thumbs.request(range(npages))
         self._visible_timer.start()
         if select is not None:
-            self.select_section(select)
+            self.select_section(select, reveal)
+        if self._after_delete is not None:
+            self._select_after_delete(*self._after_delete)
+            self._after_delete = None
+        QTimer.singleShot(0, lambda: sb.setValue(min(self._hold if self._hold is not None else sb.value(), sb.maximum())))
 
     def current_section(self):
-        return next((s for c, s in self._cards if c is self._active), None)
+        sec = next((s for c, s in self._cards if c is self._active), None)
+        return None if sec == DELETE else sec
+
+    # ---- deleting pages
+    def _delete_selected(self, card: GroupCard, sec) -> None:
+        """Del on the selected thumbnails: ask for those pages to be deleted, and plan to select the page that moves
+        up into the gap, so that pressing Del again clears a run of blank pages."""
+        rows = sorted(card.list.row(i) for i in card.list.selectedItems())
+        pages = card.list.selected_pages()
+        if pages:
+            self._after_delete = (sec, rows[0])
+            self.delete_requested.emit(pages)
+
+    def _select_after_delete(self, sec, row: int) -> None:
+        for card, s in self._cards:
+            if s is sec and card.list.count():
+                card.list.setCurrentRow(min(row, card.list.count() - 1))
+                card.list.setFocus()
+                return
 
     # ---- selection
     def _activate(self, card: GroupCard | None) -> None:
@@ -567,11 +619,14 @@ class MapView(QWidget):
         self._activate(card)
         self.picked.emit(sec, None)
 
-    def select_section(self, sec) -> None:
+    def select_section(self, sec, reveal: bool = False) -> None:
+        """Mark a part as the current one; scroll to it only when asked (never after an edit: the view stays put)."""
         for card, s in self._cards:
             if s is sec:
                 self._activate(card)
-                QTimer.singleShot(0, lambda c=card: self.area.ensureWidgetVisible(c, 0, 40))
+                if reveal:
+                    self._hold = None
+                    QTimer.singleShot(0, lambda c=card: self.area.ensureWidgetVisible(c, 0, 40))
                 return
 
     def edit_name(self, sec) -> None:
@@ -592,6 +647,18 @@ class MapView(QWidget):
                     card.list.scrollToItem(card.list.item(r))
                     QTimer.singleShot(0, lambda c=card, ro=r: self._ensure(c, ro))
                     return
+
+    def _show_if_hidden(self, card: GroupCard, item) -> None:
+        """Scroll to a page only if it is not on screen: after a drop the view stays where the user is working."""
+        try:
+            if card.is_collapsed():
+                return
+            top = card.list.mapTo(self.canvas, card.list.visualItemRect(item).topLeft()).y()
+        except RuntimeError:                            # the card was rebuilt meanwhile
+            return
+        sb = self.area.verticalScrollBar()
+        if top < sb.value() or top + THUMB_H > sb.value() + self.area.viewport().height():
+            self._ensure(card, card.list.row(item))
 
     def _ensure(self, card: GroupCard, row: int) -> None:
         rect = card.list.visualItemRect(card.list.item(row))
@@ -627,15 +694,21 @@ class MapView(QWidget):
         if not pages:
             return
         menu = QMenu(self)
-        move = menu.addMenu(f"Move {len(pages)} page{'s' if len(pages) != 1 else ''} to")
+        if sec != DELETE:
+            menu.addAction(f"Delete {len(pages)} page{'s' if len(pages) != 1 else ''}\tDel", lambda: self._delete_selected(card, sec))
+        move = menu.addMenu(f"{'Restore' if sec == DELETE else 'Move'} {len(pages)} page{'s' if len(pages) != 1 else ''} to")
         for c, s in self._cards:
-            if s is not None and s is not sec:
-                move.addAction(c.name.text() or "(unnamed)", lambda s=s: self.move_requested.emit(pages, s, -1))
+            if s is not None and s != DELETE and s is not sec:
+                move.addAction(c.name.text() or "(unnamed)", lambda s=s: self._menu_move(pages, s))
         move.addSeparator()
-        move.addAction("New part", lambda: self.move_requested.emit(pages, NEW_PART, -1))
-        if sec is not None:
-            menu.addAction("Remove from this part", lambda: self.move_requested.emit(pages, None, -1))
+        move.addAction("New part", lambda: self._menu_move(pages, NEW_PART))
+        if sec is not None and sec != DELETE:
+            menu.addAction("Remove from this part (keep it as unassigned)", lambda: self.move_requested.emit(pages, None, -1))
         menu.exec(lst.viewport().mapToGlobal(pos))
+
+    def _menu_move(self, pages, target) -> None:
+        self._reveal_next = True
+        self.move_requested.emit(pages, target, -1)
 
     # ---- auto-scroll while dragging near the edge of the list
     def _drag_state(self, on: bool) -> None:
@@ -659,7 +732,10 @@ class MapView(QWidget):
             self._activate(card)
             card.flash()
             first = self._items[pages[0]][0]
-            QTimer.singleShot(60, lambda: self._ensure(card, card.list.row(first)) if not card.is_collapsed() else None)
+            if self._reveal_next:                       # a drop happens under the cursor: the view stays put
+                self._reveal_next = False
+                self._hold = None
+                QTimer.singleShot(400, lambda: self._show_if_hidden(card, first))
         items = [it for p in pages for it in self._items[p]]
         anim = QVariantAnimation(self)
         anim.setStartValue(1.0)

@@ -28,13 +28,30 @@ page in the wrong part.
 
 ## Telegram bot
 Send the bot a PDF and pick: split into instruments (ZIP), A3 → A4 only, or A3 → A4 + better contrast
-(20 MB in, 50 MB out – Telegram's limits for bots).
+(see below for PDFs over 20 MB).
 
 1. Create a bot with [@BotFather](https://t.me/BotFather) and `cp .env.example .env`, then fill in `TELEGRAM_BOT_TOKEN`
    (optionally `ALLOWED_USERS`, comma separated Telegram ids – find yours with @userinfobot).
 2. `python -m sheetmusic bot`, or in Docker: `./run_bot.sh` (build + start; `./run_bot.sh logs` / `stop`).
 
 The bot is a long-running worker (long polling, no public URL): run it on any always-on machine or a worker service.
+
+### PDFs above 20 MB
+The HTTP Bot API refuses to hand a bot more than 20 MB per file ("File is too big", it is Telegram that says so). Two ways around it:
+
+1. **Direct, up to 2 GB (recommended):** let the bot also log in over Telegram's normal protocol (MTProto) for big downloads.
+   Get an `api_id` / `api_hash` at <https://my.telegram.org> → *API development tools*, put them in `.env` as `TELEGRAM_API_ID`
+   and `TELEGRAM_API_HASH`, restart the bot. The log then says `MTProto connection ready`, and any PDF up to 2000 MB just works.
+2. **Without credentials:** the bot asks for a **split ZIP** instead: all pieces in one go, in any order; it puts them back
+   together, then asks what to do. `/cancel` drops pieces it is still waiting for.
+
+* 7-Zip / Keka: *Add to archive* → format **zip** → *Split to volumes* `15M` → `name.zip.001`, `name.zip.002`, …
+* Terminal: `zip -s 15m name.zip big.pdf` → `name.z01`, `name.z02`, …, `name.zip`
+* A PDF cut into pieces named `big.pdf.001`, `big.pdf.002`, … also works.
+* A normal `.zip` with one PDF inside works too.
+
+Results come back the same way in reverse: a ZIP of the parts, or, above 50 MB, several ZIPs (`Title (1 of 3).zip` …); a single
+file that is itself over 50 MB arrives as `.zip.001`, `.zip.002`, … volumes that 7-Zip / `unzip` join again.
 
 ## Command line
 ```bash
@@ -65,6 +82,27 @@ tests/                             pytest, synthetic PDFs only (no OCR / display
 The dependency rule: `parts`, `a3` and the helpers know nothing about the GUI or the bot; the GUI and the bot only
 call into them. To change how parts are *found*, look in `parts/analysis.py` / `sectioning.py`; to change how they are
 *corrected by hand*, `parts/editing.py` (+ `gui/groupmap.py` for the widgets).
+
+## How parts are found (and what to do when it goes wrong)
+Every page is OCR'd (header band + left margin), then `parts/` decides:
+
+* **score page** – at least 5 *instrument names / abbreviations* in the left margin (`Fl.`, `Clarinet` …; ordinary
+  text there is notation noise, so only instrument words count), plus a few-page gap between two score pages.
+* **a part starts** on a page that shows the piece title and/or an instrument name at the top left. When the parts found
+  are evenly spaced (e.g. all 4 pages) and a page at the expected spot has some heading, that is a part too (`*inferred*`).
+* **a title page can carry its label badly** (a library stamp over it): the top-left corner is then read again, close up.
+  A note lower on the page (`Bombo`, `(Flute)`) never names or opens a part.
+* **folded A3 booklets** are recognised: after halving, a booklet's pages come as 4, 1, 2, 3, so the last page of each part
+  sits *before* its title page. When most parts show that, each part starts one page earlier, and its pages are put in
+  reading order 1, 2, 3, 4 (shown as e.g. `52-54, 51`). Parts are then whole 4-page sheets, which also repairs a boundary
+  that is a page out.
+* **names** are read from the title page and the centered headers, voted, then cleaned: `Flute If` → `Flute 2`,
+  numbers inferred for `Clarinet ×3`, `Horns 1-3` kept. Instrument words are known in English, Spanish / Galician /
+  Portuguese / Catalan, Italian, French, German and Dutch (`parts/instruments.py`).
+
+When a set comes out wrong: run `python -m sheetmusic parts set.pdf --dry-run`, look at the page numbers that are off, and
+fix them in the GUI map (drag pages, rename). To teach it something general, add a test in `tests/test_sectioning.py`
+using `PageInfo` objects (no PDF needed) and change `parts/sectioning.py` / `parts/instruments.py`.
 
 ## Tests
 `pytest` (needs `pip install -e ".[dev,gui]"`; the GUI tests run offscreen and skip themselves without PySide6).

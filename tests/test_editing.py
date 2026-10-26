@@ -63,3 +63,32 @@ def test_merge_and_split():
     new = split_section(secs, a, 5)
     assert new.page_list() == [5, 6, 7] and a.page_list() == [0, 1, 2, 3, 4] and new in secs
     assert split_section(secs, a, 0) is None and split_section(secs, a, 99) is None
+
+
+def test_deleting_pages_takes_them_out_of_their_section_and_does_not_make_them_missing():
+    from sheetmusic.parts import DELETE, apply_move
+    a, b, c = secs = sections()
+    deleted = set()
+    assert apply_move(secs, deleted, [1, 5], DELETE) is None
+    assert a.page_list() == [0, 2, 3] and b.page_list() == [4, 6, 7] and deleted == {1, 5}
+    assert unassigned_pages(secs, 12) == [1, 5]                          # without `deleted` they would be "missing"
+    assert unassigned_pages(secs, 12, deleted) == []
+
+
+def test_a_deleted_part_page_comes_back_when_it_is_moved_to_a_part():
+    from sheetmusic.parts import DELETE, apply_move
+    a, b, c = secs = sections()
+    deleted = set()
+    apply_move(secs, deleted, [1, 5], DELETE)
+    assert apply_move(secs, deleted, [5], c, 0) is c
+    assert c.page_list() == [5, 8, 9, 10, 11] and deleted == {1}
+    new = apply_move(secs, deleted, [1], NEW_PART)
+    assert new.page_list() == [1] and deleted == set()
+
+
+def test_deleting_every_page_of_a_part_removes_the_part():
+    from sheetmusic.parts import DELETE, apply_move
+    a, b, c = secs = sections()
+    deleted = set()
+    apply_move(secs, deleted, [4, 5, 6, 7], DELETE)
+    assert secs == [a, c] and deleted == {4, 5, 6, 7}

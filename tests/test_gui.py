@@ -1,6 +1,7 @@
 """Smoke tests for the grouping map: real drag events are delivered to the widgets (offscreen)."""
 
 import json
+from pathlib import Path
 import time
 
 import pytest
@@ -145,3 +146,170 @@ def test_a_drop_flashes_the_target_green(app, tab):
     assert 5 in flute.page_list() and c._glow > 0.2 and c._glow_color.name() == OK.lower()
     wait(app, 1.4)
     assert c._glow < 0.02
+
+
+# ---------------------------------------------------------------- the view must stay where the user is working
+@pytest.fixture
+def long_tab(app, make_pdf):
+    """Eight parts of 12 pages: far more than fits on screen, so the map scrolls."""
+    pdf = make_pdf([(100 + i, 140) for i in range(96)])
+    tab = PartsTab(Jobs())
+    tab.resize(1100, 700)
+    tab.show()
+    tab.input.setText(str(pdf))
+    tab.npages = 96
+    tab.sections = [Section(12 * k, 12 * k + 11, f"Part {k + 1} name") for k in range(8)]
+    tab.refresh(select=tab.sections[0])
+    wait(app, 0.4)
+    return tab
+
+
+def scroll_to_card(app, tab, sec):
+    card = card_of(tab, sec)
+    tab.map.area.verticalScrollBar().setValue(card.y() - 20)
+    wait(app, 0.3)
+    return tab.map.area.verticalScrollBar().value()
+
+
+def card_of(tab, sec):
+    return next(c for c, s in tab.map._cards if s is sec)
+
+
+def test_reordering_inside_a_part_keeps_the_view_where_it_was(app, long_tab):
+    tab = long_tab
+    sec = tab.sections[4]
+    before = scroll_to_card(app, tab, sec)
+    assert before > 300                                          # really scrolled down
+    lst = card_of(tab, sec).list
+    last = lst.visualItemRect(lst.item(lst.count() - 1))
+    drop(app, lst, last.center() + QPoint(20, 0), [sec.page_list()[0]])      # first page to the end of its own part
+    wait(app, 1.0)
+    assert sec.page_list()[-1] == 48                             # it did move
+    assert abs(tab.map.area.verticalScrollBar().value() - before) <= 2, "the view jumped after the drop"
+
+
+def test_moving_a_page_to_another_part_keeps_the_view_where_it_was(app, long_tab):
+    tab = long_tab
+    src, dst = tab.sections[3], tab.sections[4]
+    before = scroll_to_card(app, tab, dst)
+    lst = card_of(tab, dst).list
+    drop(app, lst, lst.visualItemRect(lst.item(2)).center(), [src.page_list()[0]])
+    wait(app, 1.0)
+    assert abs(tab.map.area.verticalScrollBar().value() - before) <= 14   # one thumbnail row may have appeared above
+
+
+# ---------------------------------------------------------------- deleting pages (blank / unused)
+from PySide6.QtTest import QTest
+
+from sheetmusic.parts import DELETE
+
+
+def deleted_card(tab):
+    return next((c for c, s in tab.map._cards if s == DELETE), None)
+
+
+def select_pages(tab, sec, rows):
+    lst = card_of(tab, sec).list
+    lst.clearSelection()
+    for r in rows:
+        lst.item(r).setSelected(True)
+    lst.setFocus()
+    return lst
+
+
+def test_delete_key_removes_the_selected_pages_into_a_deleted_card(app, tab):
+    flute, oboe, last = tab.sections
+    lst = select_pages(tab, flute, [1, 2])
+    QTest.keyClick(lst, Qt.Key_Delete)
+    wait(app, 0.4)
+    assert flute.page_list() == [0, 3] and tab.deleted == {1, 2}
+    card = deleted_card(tab)
+    assert card is not None and card.list.pages() == [1, 2] and card.is_collapsed()      # out of the way, but there
+    assert "2 deleted" in tab.cover.text() and "Missing" not in tab.cover.text()          # no nagging about "missing pages"
+    assert tab.map.strip._cells[1][0] == "Deleted pages"
+
+
+def test_deleted_pages_are_not_exported_and_not_reported_missing(app, tab, tmp_path):
+    from sheetmusic.parts import export_sections, unassigned_pages
+    flute = tab.sections[0]
+    QTest.keyClick(select_pages(tab, flute, [0]), Qt.Key_Delete)
+    wait(app, 0.4)
+    assert unassigned_pages(tab.sections, tab.npages, tab.deleted) == []
+    files = export_sections(Path(tab.input.text()), tab.sections, "T", tmp_path)
+    import pypdfium2 as pdfium
+    assert sum(len(pdfium.PdfDocument(str(f))) for f in files) == 11                       # 12 pages minus the deleted one
+
+
+def test_pressing_delete_again_clears_a_run_of_blank_pages_one_after_the_other(app, tab):
+    flute = tab.sections[0]
+    QTest.keyClick(select_pages(tab, flute, [0]), Qt.Key_Delete)
+    wait(app, 0.4)
+    focused = card_of(tab, flute).list
+    assert focused.selected_pages() == [1]                                                  # the page that moved up is selected
+    QTest.keyClick(focused, Qt.Key_Delete)
+    wait(app, 0.4)
+    QTest.keyClick(card_of(tab, flute).list, Qt.Key_Delete)
+    wait(app, 0.4)
+    assert tab.deleted == {0, 1, 2} and flute.page_list() == [3]
+
+
+def test_ctrl_z_brings_deleted_pages_back_where_they_were(app, tab):
+    flute = tab.sections[0]
+    QTest.keyClick(select_pages(tab, flute, [1, 2]), Qt.Key_Delete)
+    wait(app, 0.4)
+    tab.undo()
+    wait(app, 0.4)
+    assert flute.page_list() == [0, 1, 2, 3] and tab.deleted == set() and deleted_card(tab) is None
+
+
+def test_a_deleted_page_can_be_dragged_back_into_a_part(app, tab):
+    flute, oboe, _ = tab.sections
+    QTest.keyClick(select_pages(tab, flute, [1]), Qt.Key_Delete)
+    wait(app, 0.4)
+    card = deleted_card(tab)
+    card.set_collapsed(False)
+    wait(app, 0.2)
+    lst = card_of(tab, oboe).list
+    drop(app, lst, lst.visualItemRect(lst.item(0)).center() - QPoint(20, 0), [1])
+    assert oboe.page_list()[0] == 1 and tab.deleted == set()
+
+
+def test_dropping_pages_on_the_deleted_card_deletes_them(app, tab):
+    flute, oboe, last = tab.sections
+    QTest.keyClick(select_pages(tab, oboe, [0]), Qt.Key_Delete)           # make the card exist first
+    wait(app, 0.4)
+    drop(app, deleted_card(tab), QPoint(30, 10), [8])
+    assert tab.deleted == {4, 8} and 8 not in last.page_list()
+
+
+def test_the_right_click_menu_offers_delete_and_the_deleted_card_offers_restore(app, tab):
+    from PySide6.QtWidgets import QMenu
+    flute = tab.sections[0]
+    lst = select_pages(tab, flute, [1])
+    seen = []
+    from sheetmusic.gui import groupmap
+    real_exec = QMenu.exec
+    QMenu.exec = lambda self, *a, **k: seen.append([a.text() for a in self.actions()]) or None
+    try:
+        tab.map._menu(card_of(tab, flute), flute, lst.visualItemRect(lst.item(1)).center())
+        assert any(t.startswith("Delete 1 page") for t in seen[0])
+        QTest.keyClick(lst, Qt.Key_Delete)
+        wait(app, 0.4)
+        card = deleted_card(tab)
+        card.set_collapsed(False)
+        wait(app, 0.2)
+        card.list.item(0).setSelected(True)
+        tab.map._menu(card, DELETE, card.list.visualItemRect(card.list.item(0)).center())
+        assert not any(t.startswith("Delete") for t in seen[1]) and any(t.startswith("Restore 1 page") for t in seen[1])
+    finally:
+        QMenu.exec = real_exec
+
+
+def test_deleting_keeps_the_view_where_it_was(app, long_tab):
+    tab = long_tab
+    sec = tab.sections[5]
+    before = scroll_to_card(app, tab, sec)
+    QTest.keyClick(select_pages(tab, sec, [3]), Qt.Key_Delete)
+    wait(app, 1.0)
+    assert 5 * 12 + 3 in tab.deleted
+    assert abs(tab.map.area.verticalScrollBar().value() - before) <= 2, "the view jumped after deleting"

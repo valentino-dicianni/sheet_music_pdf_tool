@@ -12,7 +12,7 @@ dependencies = ["pypdfium2", "pillow", "numpy", "pytesseract"]
 
 [project.optional-dependencies]
 gui = ["PySide6"]
-bot = ["python-telegram-bot>=21,<23", "python-dotenv"]
+bot = ["python-telegram-bot>=21,<23", "python-dotenv", "telethon"]
 dev = ["pytest"]
 
 [project.scripts]
