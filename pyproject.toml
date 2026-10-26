@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sheetmusic-tools"
+version = "0.2.0"
+description = "Split scanned sheet-music sets into parts, A3 -> A4 with better contrast; desktop app and Telegram bot"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["pypdfium2", "pillow", "numpy", "pytesseract"]
+
+[project.optional-dependencies]
+gui = ["PySide6"]
+bot = ["python-telegram-bot>=21,<23", "python-dotenv"]
+dev = ["pytest"]
+
+[project.scripts]
+sheetmusic = "sheetmusic.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["sheetmusic*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

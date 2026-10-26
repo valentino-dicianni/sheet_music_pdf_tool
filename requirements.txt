@@ -1,6 +1,2 @@
-flask
-gunicorn
-pypdfium2
-pillow
-numpy
-pytesseract
+# Everything for local use (the dependencies are declared in pyproject.toml)
+-e .[gui,bot]
