@@ -22,7 +22,10 @@ page in the wrong part.
 
 * drag pages (Ctrl/Shift-click for several) onto another part – the destination lights up and a marker shows where they
   land; drop on a part's header to append, on "Drop pages here" to start a new part; hover a collapsed part to open it
-* right-click a page for "Move to…"; edit a part's name in its header; **Ctrl+Z** undoes any edit
+* **Del** removes the selected pages (blank or unused ones): they move to a grey *Deleted pages* card at the bottom, are not
+  exported and are not reported as missing; drag them back to a part to restore. After a Del the next page is selected,
+  so pressing Del again clears a run of blank pages. The view never jumps after a drop or a delete.
+* right-click a page for "Move to…" / "Delete"; edit a part's name in its header; **Ctrl+Z** undoes any edit
 * the preview on the right shows the selected part's pages in output order
 * **List** is the table view (edit names and page ranges such as `33-36, 40`; merge / split / delete)
 

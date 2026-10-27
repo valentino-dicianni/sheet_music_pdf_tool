@@ -541,7 +541,7 @@ class MapView(QWidget):
             card.list.menu_requested.connect(lambda pos, c=card, s=sec: self._menu(c, s, pos))
             card.header_clicked.connect(lambda c=card, s=sec: self._header(c, s))
             card.renamed.connect(lambda text, s=sec: s is not None and self.rename_requested.emit(s, text))
-            if sec is not None and sec.is_score:
+            if getattr(sec, "is_score", False):
                 f = card.name.font()
                 f.setBold(True)
                 card.name.setFont(f)
@@ -685,6 +685,12 @@ class MapView(QWidget):
 
     # ---- context menu
     def _menu(self, card: GroupCard, sec, pos) -> None:
+        menu = self._build_menu(card, sec, pos)
+        if menu is not None:
+            menu.exec(card.list.viewport().mapToGlobal(pos))
+
+    def _build_menu(self, card: GroupCard, sec, pos) -> QMenu | None:
+        """The right-click menu of the pages under `pos` (built, not shown: tests inspect it)."""
         lst = card.list
         item = lst.itemAt(pos)
         if item is not None and not item.isSelected():
@@ -692,7 +698,7 @@ class MapView(QWidget):
             item.setSelected(True)
         pages = lst.selected_pages()
         if not pages:
-            return
+            return None
         menu = QMenu(self)
         if sec != DELETE:
             menu.addAction(f"Delete {len(pages)} page{'s' if len(pages) != 1 else ''}\tDel", lambda: self._delete_selected(card, sec))
@@ -704,7 +710,7 @@ class MapView(QWidget):
         move.addAction("New part", lambda: self._menu_move(pages, NEW_PART))
         if sec is not None and sec != DELETE:
             menu.addAction("Remove from this part (keep it as unassigned)", lambda: self.move_requested.emit(pages, None, -1))
-        menu.exec(lst.viewport().mapToGlobal(pos))
+        return menu
 
     def _menu_move(self, pages, target) -> None:
         self._reveal_next = True

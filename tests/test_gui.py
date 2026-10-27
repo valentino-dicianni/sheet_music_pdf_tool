@@ -282,27 +282,31 @@ def test_dropping_pages_on_the_deleted_card_deletes_them(app, tab):
     assert tab.deleted == {4, 8} and 8 not in last.page_list()
 
 
+def menu_texts(menu):
+    texts = [a.text() for a in menu.actions()]
+    for a in menu.actions():
+        if a.menu():
+            texts += [x.text() for x in a.menu().actions()]
+    return texts
+
+
 def test_the_right_click_menu_offers_delete_and_the_deleted_card_offers_restore(app, tab):
-    from PySide6.QtWidgets import QMenu
     flute = tab.sections[0]
     lst = select_pages(tab, flute, [1])
-    seen = []
-    from sheetmusic.gui import groupmap
-    real_exec = QMenu.exec
-    QMenu.exec = lambda self, *a, **k: seen.append([a.text() for a in self.actions()]) or None
-    try:
-        tab.map._menu(card_of(tab, flute), flute, lst.visualItemRect(lst.item(1)).center())
-        assert any(t.startswith("Delete 1 page") for t in seen[0])
-        QTest.keyClick(lst, Qt.Key_Delete)
-        wait(app, 0.4)
-        card = deleted_card(tab)
-        card.set_collapsed(False)
-        wait(app, 0.2)
-        card.list.item(0).setSelected(True)
-        tab.map._menu(card, DELETE, card.list.visualItemRect(card.list.item(0)).center())
-        assert not any(t.startswith("Delete") for t in seen[1]) and any(t.startswith("Restore 1 page") for t in seen[1])
-    finally:
-        QMenu.exec = real_exec
+    pos = lst.visualItemRect(lst.item(1)).center()
+    texts = menu_texts(tab.map._build_menu(card_of(tab, flute), flute, pos))
+    assert any(t.startswith("Delete 1 page") for t in texts)
+    assert any(t.startswith("Move 1 page to") for t in texts)
+
+    # Delete through the menu action, then look at the menu of the deleted card
+    next(a for a in tab.map._build_menu(card_of(tab, flute), flute, pos).actions() if a.text().startswith("Delete")).trigger()
+    wait(app, 0.4)
+    card = deleted_card(tab)
+    card.set_collapsed(False)
+    wait(app, 0.2)
+    card.list.item(0).setSelected(True)
+    texts = menu_texts(tab.map._build_menu(card, DELETE, card.list.visualItemRect(card.list.item(0)).center()))
+    assert not any(t.startswith("Delete") for t in texts) and any(t.startswith("Restore 1 page") for t in texts)
 
 
 def test_deleting_keeps_the_view_where_it_was(app, long_tab):
