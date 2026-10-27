@@ -1,8 +1,10 @@
 """The main window and the entry point of the desktop app."""
 
+import os
 import sys
 from pathlib import Path
 
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMainWindow, QTabWidget
 
 from .a3_tab import A3Tab
@@ -42,8 +44,13 @@ class MainWindow(QMainWindow):
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Qt 6 on Wayland logs a spurious text-input warning whenever the window loses focus.
+    rules = os.environ.get("QT_LOGGING_RULES", "")
+    os.environ["QT_LOGGING_RULES"] = ";".join(filter(None, [rules, "qt.qpa.wayland.textinput=false"]))
     app = QApplication([sys.argv[0], *(argv or [])])
     app.setApplicationName("Sheet Music PDF Tools")
+    app.setWindowIcon(QIcon(str(Path(__file__).with_name("icon.png"))))
+    app.setDesktopFileName("sheetmusic-tools")     # Wayland takes the icon from the installed .desktop file
     apply_theme(app)
     w = MainWindow()
     w.show()

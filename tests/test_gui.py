@@ -79,6 +79,21 @@ def test_drop_on_a_thumbnail_moves_the_page_there(app, tab):
     assert flute.page_list() == [0, 7, 1, 2, 3] and oboe.page_list() == [4, 5, 6]
 
 
+def test_rebuilt_parts_start_at_their_final_height(app, tab):
+    """After a move every card is rebuilt: a list that first took a default height and then fitted itself made the
+    target part fold and unfold."""
+    tab.refresh(select=tab.sections[0])
+    first = [c.list.height() for c, _ in tab.map._cards]
+    wait(app, 0.3)
+    assert first == [c.list.height() for c, _ in tab.map._cards]
+
+
+def test_real_drags_reach_the_thumbnails_not_the_card(tab):
+    """Qt delivers a real drag to the viewport under the cursor: if it refused drops, every drop on a thumbnail
+    fell through to the card and was appended at the end."""
+    assert all(c.list.viewport().acceptDrops() for c, _ in tab.map._cards)
+
+
 def test_drop_on_a_header_appends_and_drop_zone_makes_a_new_part(app, tab):
     flute, oboe, _ = tab.sections
     drop(app, card(tab, oboe), QPoint(30, 10), [0, 1])

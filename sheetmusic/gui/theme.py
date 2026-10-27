@@ -51,8 +51,10 @@ QListWidget#thumbs::item:selected { background: palette(highlight); color: palet
 QLineEdit#gname { border: 1px solid transparent; background: transparent; font-weight: 600; padding: 2px 4px; }
 QLineEdit#gname:hover:!read-only, QLineEdit#gname:focus { border-color: palette(mid); background: palette(window); }
 QLabel#dropzone { border: 2px dashed palette(mid); border-radius: 8px; padding: 14px; color: palette(placeholder-text); }
-QPushButton#seg { border-radius: 0; padding: 4px 14px; }
-QPushButton#seg:checked { background: palette(highlight); color: palette(highlighted-text); border-color: palette(highlight); }
+QPushButton#seg { border: none; border-radius: 0; border-bottom: 2px solid transparent; background: transparent; padding: 6px 14px; }
+QPushButton#seg:checked { border-bottom-color: palette(highlight); font-weight: 600; }
+QPushButton#seg:hover:!checked { border-bottom-color: palette(mid); }
+QPushButton#seg:pressed { background: transparent; }
 """
 
 

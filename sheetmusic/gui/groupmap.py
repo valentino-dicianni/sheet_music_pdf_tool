@@ -4,11 +4,13 @@ Pages move between parts by drag & drop (with animated drop targets) or the righ
 
 import json
 
-from PySide6.QtCore import QEasingCurve, QMimeData, QRect, QRectF, QSize, QTimer, QVariantAnimation, Qt, Signal
+from PySide6.QtCore import (
+    QEasingCurve, QEvent, QMimeData, QPoint, QPointF, QRectF, QSize, QTimer, QVariantAnimation, Qt, Signal,
+)
 from PySide6.QtGui import QBrush, QColor, QCursor, QDrag, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
-    QAbstractItemView, QFrame, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget, QListWidgetItem, QMenu,
-    QPushButton, QScrollArea, QToolTip, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget, QListWidgetItem,
+    QMenu, QPushButton, QScrollArea, QStyledItemDelegate, QStyleOptionViewItem, QToolTip, QVBoxLayout, QWidget,
 )
 
 from ..parts import DELETE, NEW_PART, coverage
@@ -24,6 +26,15 @@ PAGES_MIME = "application/x-sheetmusic-pages"
 
 def _pages_from(mime: QMimeData) -> list[int]:
     return [int(p) for p in json.loads(bytes(mime.data(PAGES_MIME)).decode())]
+
+
+def _fit(pix: QPixmap, box: QRectF) -> QRectF:
+    """`pix`'s rectangle scaled to fit in `box` (keeping its aspect), centered."""
+    size = pix.deviceIndependentSize()
+    k = min(box.width() / max(size.width(), 1), box.height() / max(size.height(), 1))
+    r = QRectF(0, 0, size.width() * k, size.height() * k)
+    r.moveCenter(box.center())
+    return r
 
 
 
@@ -69,15 +80,144 @@ class OverviewStrip(QWidget):
             self.clicked.emit(i)
 
 
+class DragGhost(QWidget):
+    """The pages being dragged, drawn under the cursor inside the window: a small fanned stack of thumbnails with a
+    count badge that pops in, trails the cursor and tilts with its motion. (Compositors such as GNOME on Wayland do
+    not show the drag pixmap of a QDrag, so the app draws its own.) It follows the drag events of every widget."""
+
+    PAD = 26
+
+    def __init__(self, window: QWidget, pixmaps: list[QPixmap], count: int, at: QPoint):
+        super().__init__(window)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WA_NoSystemBackground)
+        self._pix, self._count = pixmaps[:3], count
+        self.resize(THUMB_W + 2 * self.PAD, THUMB_H + 2 * self.PAD)
+        self._target = self._pos = QPointF(at)
+        self._tilt = 0.0
+        self._scale, self._opacity = 0.6, 0.0
+        self._in = True                                 # False once released: shrink and fade out
+        self._frame = QTimer(self, interval=16)
+        self._frame.timeout.connect(self._step)
+        self._away = QTimer(self, singleShot=True, interval=80)     # the cursor left the window
+        self._away.timeout.connect(self.hide)
+        self._place()
+        self.show()
+        self.raise_()
+        self._frame.start()
+        QApplication.instance().installEventFilter(self)
+
+    def finish(self) -> None:
+        QApplication.instance().removeEventFilter(self)
+        self._in = False
+
+    def eventFilter(self, obj, ev):
+        t = ev.type()
+        if t in (QEvent.DragEnter, QEvent.DragMove) and isinstance(obj, QWidget) and obj.window() is self.parent():
+            self._away.stop()
+            self._target = QPointF(obj.mapTo(self.parent(), ev.position().toPoint()))
+            if not self.isVisible():
+                self._pos = self._target
+                self.show()
+        elif t == QEvent.DragLeave:
+            self._away.start()
+        return False
+
+    def _step(self) -> None:
+        d = self._target - self._pos
+        self._pos += d * 0.45
+        self._tilt += (max(-14.0, min(14.0, d.x() * 0.5)) - self._tilt) * 0.25
+        if self._in:
+            self._scale += (1.0 - self._scale) * 0.3
+            self._opacity += (1.0 - self._opacity) * 0.3
+        else:
+            self._scale += (0.5 - self._scale) * 0.3
+            self._opacity -= 0.16
+            if self._opacity <= 0:
+                self._frame.stop()
+                self.deleteLater()
+                return
+        self._place()
+        self.update()
+
+    def _place(self) -> None:
+        self.move(round(self._pos.x() - self.width() / 2), round(self._pos.y() - self.PAD - THUMB_H * 0.3))
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        p.setOpacity(max(0.0, min(1.0, self._opacity)))
+        p.translate(self.width() / 2, self.PAD + THUMB_H * 0.3)        # pivot at the cursor
+        p.scale(self._scale, self._scale)
+        p.rotate(self._tilt)
+        card = QRectF(-THUMB_W / 2, -THUMB_H * 0.3, THUMB_W, THUMB_H)
+        for i in reversed(range(min(self._count, 3))):
+            p.save()
+            p.rotate(i * 6)
+            p.translate(i * 4, i * 2)
+            for k in range(4):                          # soft shadow
+                shade = QColor(0, 0, 0, 14)
+                p.setPen(Qt.NoPen)
+                p.setBrush(shade)
+                p.drawRoundedRect(card.adjusted(-k + 2, -k + 4, k + 2, k + 5), 5 + k, 5 + k)
+            p.setBrush(QColor("white"))
+            p.setPen(QPen(QColor(0, 0, 0, 60), 1))
+            p.drawRoundedRect(card, 4, 4)
+            if i < len(self._pix):
+                p.drawPixmap(_fit(self._pix[i], card), self._pix[i], QRectF(self._pix[i].rect()))
+            p.restore()
+        if self._count > 1:
+            text = str(self._count)
+            w = 22 if len(text) < 2 else 30
+            badge = QRectF(card.right() - w / 2 - 2, card.top() - 9, w, 20)
+            p.setPen(QPen(QColor("white"), 2))
+            p.setBrush(QColor(ACCENT))
+            p.drawRoundedRect(badge, 10, 10)
+            f = p.font()
+            f.setBold(True)
+            p.setFont(f)
+            p.setPen(QColor("white"))
+            p.drawText(badge, Qt.AlignCenter, text)
+
+
+class _ShiftDelegate(QStyledItemDelegate):
+    """Draws each thumbnail at its animated preview position, hides the pages being moved within their own part
+    and dims them in the part they are leaving."""
+
+    def __init__(self, lst: "GroupList"):
+        super().__init__(lst)
+        self.lst = lst
+
+    def paint(self, painter, option, index):
+        row = index.row()
+        if row in self.lst._hidden:
+            return
+        opt = QStyleOptionViewItem(option)
+        off = self.lst._offsets.get(row)
+        if off is not None:
+            opt.rect = option.rect.translated(off.toPoint())
+        dim = row in self.lst._own
+        if dim:
+            painter.save()
+            painter.setOpacity(0.3)
+        super().paint(painter, opt, index)
+        if dim:
+            painter.restore()
+
+
 class GroupList(QListWidget):
     """The page thumbnails of one part. Selected pages are dragged as a list of page numbers and
-    dropped onto any part; the target decides the position (the model is changed by the owner)."""
+    dropped onto any part; the target decides the position (the model is changed by the owner).
+    While a drag hovers, the thumbnails slide apart to open a gap where the pages would land."""
 
     dropped = Signal(object, int)               # pages, insert row (-1: at the end)
     drag_state = Signal(bool)
     delete_requested = Signal()                 # Delete / Backspace pressed with pages selected
     hovered = Signal(bool)                      # a drag of pages is over this list
     menu_requested = Signal(object)
+
+    drag: dict = {}                             # the drag in progress in this app: {"pages": [...], "pix": {page: QPixmap}}
 
     def __init__(self):
         super().__init__(objectName="thumbs")
@@ -92,17 +232,29 @@ class GroupList(QListWidget):
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
+        self.viewport().setAcceptDrops(True)    # setMovement(Static) turned it off: real drags fell through to the card
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setFrameShape(QFrame.NoFrame)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(lambda pos: self.menu_requested.emit(pos))
-        self._drop_row: int | None = None
+        self.setItemDelegate(_ShiftDelegate(self))
+        self._drop_index: int | None = None     # where the gap is, counted among the pages that stay
+        self._gap = 0                           # pages in the gap
+        self._own: set[int] = set()             # rows of this list being dragged
+        self._hidden: set[int] = set()          # rows taken out of the layout (dragged within this list)
+        self._offsets: dict[int, QPointF] = {}  # row -> current animated shift from its real cell
+        self._targets: dict[int, QPointF] = {}
+        self._gap_alpha = 0.0
+        self._extra = 0                         # cells added to the height while a gap is open
+        self._press = QPoint()
+        self._slide = QTimer(self, interval=16)
+        self._slide.timeout.connect(self._step)
         self._pulse = 1.0
-        self._pulse_anim = QVariantAnimation(self)      # the insertion marker breathes while a drag hovers
-        self._pulse_anim.setDuration(750)
+        self._pulse_anim = QVariantAnimation(self)      # the gap's outline breathes while a drag hovers
+        self._pulse_anim.setDuration(900)
         self._pulse_anim.setLoopCount(-1)
-        for t, v in ((0.0, 0.35), (0.5, 1.0), (1.0, 0.35)):
+        for t, v in ((0.0, 0.45), (0.5, 1.0), (1.0, 0.45)):
             self._pulse_anim.setKeyValueAt(t, v)
         self._pulse_anim.valueChanged.connect(self._set_pulse)
 
@@ -111,9 +263,8 @@ class GroupList(QListWidget):
         self.viewport().update()
 
     def _end_hover(self) -> None:
-        self._drop_row = None
+        self._show_gap(None)
         self._pulse_anim.stop()
-        self.viewport().update()
         self.hovered.emit(False)
 
     def pages(self) -> list[int]:
@@ -133,13 +284,21 @@ class GroupList(QListWidget):
         super().resizeEvent(ev)
         QTimer.singleShot(0, self.fit_height)
 
-    def fit_height(self) -> None:
-        cols = max(1, (self.viewport().width()) // CELL_W)
-        h = -(-max(self.count(), 1) // cols) * CELL_H + 6
+    def _cols(self) -> int:
+        return max(1, self.viewport().width() // CELL_W)
+
+    def fit_height(self, width: int | None = None) -> None:
+        """`width`: the viewport width to plan for, before this list has been laid out (a rebuilt map)."""
+        cols = max(1, width // CELL_W) if width else self._cols()
+        h = -(-max(self.count() + self._extra, 1) // cols) * CELL_H + 6
         if h != self.height():
             self.setFixedHeight(h)
 
     # ---- drag source
+    def mousePressEvent(self, ev):
+        self._press = ev.position().toPoint()
+        super().mousePressEvent(ev)
+
     def startDrag(self, actions):
         pages = self.selected_pages()
         if not pages:
@@ -148,46 +307,116 @@ class GroupList(QListWidget):
         mime.setData(PAGES_MIME, json.dumps(pages).encode())
         drag = QDrag(self)
         drag.setMimeData(mime)
-        first = self.selectedItems()[0].icon().pixmap(QSize(THUMB_W, THUMB_H))
-        badge = QPixmap(first.size())
-        badge.fill(Qt.transparent)
-        q = QPainter(badge)
-        q.setOpacity(0.8)
-        q.drawPixmap(0, 0, first)
-        q.setOpacity(1)
-        q.setBrush(QColor(ACCENT))
-        q.setPen(Qt.NoPen)
-        q.drawRoundedRect(2, 2, 26 if len(pages) > 9 else 20, 18, 8, 8)
-        q.setPen(QColor("white"))
-        q.drawText(QRect(2, 2, 26 if len(pages) > 9 else 20, 18), Qt.AlignCenter, str(len(pages)))
-        q.end()
-        drag.setPixmap(badge)
+        blank = QPixmap(1, 1)                           # the ghost below is the drag image
+        blank.fill(Qt.transparent)
+        drag.setPixmap(blank)
+        items = sorted(self.selectedItems(), key=self.row)
+        pix = {it.data(Qt.UserRole): it.icon().pixmap(QSize(THUMB_W, THUMB_H)) for it in items}
+        GroupList.drag = {"pages": pages, "pix": pix}
+        self._own = {self.row(it) for it in items}
+        self.viewport().update()
+        ghost = DragGhost(self.window(), [pix[it.data(Qt.UserRole)] for it in items], len(pages),
+                          self.viewport().mapTo(self.window(), self._press))
         self.drag_state.emit(True)
-        drag.exec(Qt.MoveAction)
-        self.drag_state.emit(False)
+        try:
+            drag.exec(Qt.MoveAction)
+        finally:
+            ghost.finish()
+            GroupList.drag = {}
+            self.drag_state.emit(False)
+        try:
+            self._own = set()
+            self._show_gap(None)
+        except RuntimeError:                            # the list was rebuilt by the drop
+            pass
 
     # ---- drop target
-    def _row_at(self, pos) -> int:
-        item = self.itemAt(pos)
-        if item is None:
-            return self.count()
-        row = self.row(item)
-        return row + (1 if pos.x() > self.visualItemRect(item).center().x() else 0)
+    def _layout_rows(self, pages: list[int]) -> tuple[set[int], list[int]]:
+        """(rows of this list being moved, rows that stay)."""
+        moving = set(pages)
+        own = {r for r in range(self.count()) if self.item(r).data(Qt.UserRole) in moving}
+        return own, [r for r in range(self.count()) if r not in own]
+
+    def _index_at(self, pos, stay: int) -> int:
+        """The gap position under `pos`, among the `stay` pages that stay (laid out without the moved ones)."""
+        col = min(max(pos.x(), 0) // CELL_W, self._cols() - 1)
+        slot = max(pos.y(), 0) // CELL_H * self._cols() + col
+        slot += 1 if pos.x() - col * CELL_W > CELL_W / 2 else 0
+        return min(slot, stay)
+
+    def _cell(self, slot: int) -> QPoint:
+        return QPoint(slot % self._cols() * CELL_W, slot // self._cols() * CELL_H)
+
+    def _show_gap(self, index: int | None, pages: list[int] = ()) -> None:
+        """Open a gap of len(pages) cells at `index` (None: close it) and slide the thumbnails there."""
+        own, stay = self._layout_rows(pages)
+        if index is None:
+            self._hidden, self._gap, self._targets = set(), 0, {}
+        else:
+            self._hidden, self._gap = own, len(pages)
+            self._targets = {}
+            for k, r in enumerate(stay):
+                slot = k + (self._gap if k >= index else 0)
+                self._targets[r] = QPointF(self._cell(slot) - self._cell(r))
+            if index != self._drop_index:
+                self._gap_alpha = 0.0
+            extra = len(stay) + self._gap - self.count()
+            if extra > self._extra:
+                self._extra = extra
+                self.fit_height()
+        self._drop_index = index
+        if not self._slide.isActive():
+            self._slide.start()
+
+    def _step(self) -> None:
+        done = True
+        for r in set(self._offsets) | set(self._targets):
+            target = self._targets.get(r, QPointF())
+            cur = self._offsets.get(r, QPointF())
+            d = target - cur
+            if abs(d.x()) + abs(d.y()) < 0.6:
+                cur = target
+            else:
+                cur = cur + d * 0.3
+                done = False
+            if cur.isNull():
+                self._offsets.pop(r, None)
+            else:
+                self._offsets[r] = cur
+        want = 1.0 if self._drop_index is not None else 0.0
+        self._gap_alpha += (want - self._gap_alpha) * 0.25
+        if abs(want - self._gap_alpha) > 0.02:
+            done = False
+        self.viewport().update()
+        if done:
+            self._slide.stop()
+            if self._drop_index is None and self._extra:
+                self._extra = 0
+                self.fit_height()
+
+    def _drop_row(self, pos, pages: list[int]) -> int:
+        """The row (in the full list, as the model counts it) of a drop at `pos`."""
+        _, stay = self._layout_rows(pages)
+        k = self._index_at(pos, len(stay))
+        return stay[k] if k < len(stay) else self.count()
+
+    def hover_at(self, pos, pages: list[int]) -> None:
+        """Preview a drop at `pos` (None: at the end)."""
+        _, stay = self._layout_rows(pages)
+        self._show_gap(len(stay) if pos is None else self._index_at(pos, len(stay)), pages)
+        if self._pulse_anim.state() != QVariantAnimation.Running:
+            self._pulse_anim.start()
 
     def dragEnterEvent(self, ev):
         if ev.mimeData().hasFormat(PAGES_MIME):
             ev.acceptProposedAction()
+            self.hover_at(ev.position().toPoint(), _pages_from(ev.mimeData()))
             self.hovered.emit(True)
 
     def dragMoveEvent(self, ev):
         if ev.mimeData().hasFormat(PAGES_MIME):
             ev.acceptProposedAction()
-            row = self._row_at(ev.position().toPoint())
-            if row != self._drop_row:
-                self._drop_row = row
-                self.viewport().update()
-            if self._pulse_anim.state() != QVariantAnimation.Running:
-                self._pulse_anim.start()
+            self.hover_at(ev.position().toPoint(), _pages_from(ev.mimeData()))
             self.hovered.emit(True)
 
     def dragLeaveEvent(self, ev):
@@ -196,28 +425,42 @@ class GroupList(QListWidget):
     def dropEvent(self, ev):
         if not ev.mimeData().hasFormat(PAGES_MIME):
             return
-        row = self._row_at(ev.position().toPoint())
-        self._end_hover()
+        pages = _pages_from(ev.mimeData())
+        row = self._drop_row(ev.position().toPoint(), pages)
+        self._pulse_anim.stop()                 # the preview stays as it is: the rebuilt map shows the same layout
+        self.hovered.emit(False)
         ev.acceptProposedAction()
-        self.dropped.emit(_pages_from(ev.mimeData()), row)
+        self.dropped.emit(pages, row)
 
     def paintEvent(self, ev):
         super().paintEvent(ev)
-        if self._drop_row is None or not self.count():
+        if self._drop_index is None or self._gap_alpha < 0.02:
             return
-        r = self.count()
-        if self._drop_row < r:
-            rect = self.visualItemRect(self.item(self._drop_row))
-            x = rect.left() + 2
-        else:
-            rect = self.visualItemRect(self.item(r - 1))
-            x = rect.right() - 2
         p = QPainter(self.viewport())
-        halo, bar = QColor(ACCENT), QColor(ACCENT)
-        halo.setAlphaF(0.25 * self._pulse)
-        bar.setAlphaF(self._pulse)
-        p.fillRect(x - 4, rect.top() + 2, 9, THUMB_H + 4, halo)
-        p.fillRect(x - 1, rect.top() + 4, 3, THUMB_H, bar)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setOpacity(self._gap_alpha)
+        pix = GroupList.drag.get("pix", {})
+        pages = GroupList.drag.get("pages", [])
+        line = QColor(ACCENT)
+        line.setAlphaF(self._pulse)
+        fill = QColor(ACCENT)
+        fill.setAlphaF(0.10)
+        for j in range(self._gap):
+            o = self._cell(self._drop_index + j)
+            r = QRectF(o.x() + (CELL_W - THUMB_W) / 2, o.y() + 4, THUMB_W, THUMB_H).adjusted(-3, -3, 3, 3)
+            p.setPen(Qt.NoPen)
+            p.setBrush(fill)
+            p.drawRoundedRect(r, 6, 6)
+            if j < len(pages) and pages[j] in pix:
+                p.save()
+                p.setOpacity(self._gap_alpha * 0.45)
+                p.drawPixmap(_fit(pix[pages[j]], r.adjusted(3, 3, -3, -3)), pix[pages[j]], QRectF(pix[pages[j]].rect()))
+                p.restore()
+            pen = QPen(line, 2)
+            pen.setDashPattern([3.0, 2.5])
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(r, 6, 6)
 
 
 class GlowMixin:
@@ -376,6 +619,8 @@ class GroupCard(GlowMixin, QFrame):
         if ev.mimeData().hasFormat(PAGES_MIME):
             ev.acceptProposedAction()
             self.hover(True)
+            if not self.is_collapsed():         # the header / margins append: show the gap at the end
+                self.list.hover_at(None, _pages_from(ev.mimeData()))
 
     def dragMoveEvent(self, ev):
         if ev.mimeData().hasFormat(PAGES_MIME):
@@ -383,11 +628,14 @@ class GroupCard(GlowMixin, QFrame):
 
     def dragLeaveEvent(self, ev):
         self.hover(False)
+        self.list._show_gap(None)
+        self.list._pulse_anim.stop()
 
     def dropEvent(self, ev):                    # dropped on the header / margins: append
         if ev.mimeData().hasFormat(PAGES_MIME):
             ev.acceptProposedAction()
             self.set_drop(False)
+            self.list._show_gap(None)
             self.dropped.emit(_pages_from(ev.mimeData()), -1)
 
 
@@ -503,6 +751,8 @@ class MapView(QWidget):
 
         if self._flash_anim is not None:
             self._flash_anim.stop()
+        # the rebuilt lists get their height now, not after their first layout (they would fold and unfold)
+        width = next((c.list.viewport().width() for c, _ in self._cards if not c.is_collapsed()), None)
         self._cards, self._items, self._active, self._page_card = [], {}, None, {}
         self._owner = [("Not in any file", QColor(DANGER))] * npages
         while self.vbox.count():
@@ -532,6 +782,7 @@ class MapView(QWidget):
                 card.list.addItem(it)
                 self._items.setdefault(p, []).append(it)
                 self._page_card[p] = card
+            card.list.fit_height(width)
             card.list.itemSelectionChanged.connect(lambda c=card, s=sec: self._selection(c, s))
             card.list.dropped.connect(lambda pg, row, s=sec: self.move_requested.emit(pg, s, row))
             card.dropped.connect(lambda pg, row, s=sec: self.move_requested.emit(pg, s, row))
@@ -555,6 +806,7 @@ class MapView(QWidget):
         self.zone.dropped.connect(lambda pg: self.move_requested.emit(pg, NEW_PART, -1))
         self.vbox.addWidget(self.zone)
         self.vbox.addStretch(1)
+        self.vbox.activate()                            # place the new cards before anything is painted
         self.strip.set_cells(self._owner)
         self.thumbs.request(range(npages))
         self._visible_timer.start()

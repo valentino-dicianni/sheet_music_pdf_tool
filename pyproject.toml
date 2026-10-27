@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sheetmusic-tools"
-version = "0.2.0"
+version = "0.3.0"
 description = "Split scanned sheet-music sets into parts, A3 -> A4 with better contrast; desktop app and Telegram bot"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -20,6 +20,9 @@ sheetmusic = "sheetmusic.__main__:main"
 
 [tool.setuptools.packages.find]
 include = ["sheetmusic*"]
+
+[tool.setuptools.package-data]
+"sheetmusic.gui" = ["icon.png"]       # made from assets/pdf_icon.jpg
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

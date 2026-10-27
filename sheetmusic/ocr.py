@@ -1,6 +1,11 @@
 """Tesseract access, and grouping of its words into text segments. Shared by every tool."""
 
+import os
+import shutil
 import statistics
+import sys
+from functools import cache
+from pathlib import Path
 
 from PIL import Image
 
@@ -11,12 +16,29 @@ class OcrUnavailable(RuntimeError):
     """pytesseract or the tesseract binary is missing."""
 
 
+@cache
+def windows_tesseract() -> str | None:
+    """On Windows Tesseract is rarely on PATH: the copy packaged next to the app (build_app.py), else the
+    installer's default folder."""
+    if sys.platform != "win32":
+        return None
+    bundled = Path(sys.executable).parent / "tesseract" / "tesseract.exe"
+    if getattr(sys, "frozen", False) and bundled.is_file():
+        return str(bundled)
+    if shutil.which("tesseract"):
+        return None
+    default = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Tesseract-OCR" / "tesseract.exe"
+    return str(default) if default.is_file() else None
+
+
 def ocr_data(img: Image.Image, psm: int) -> dict:
     try:
         import pytesseract
         from pytesseract import Output
     except ImportError as exc:
         raise OcrUnavailable("pytesseract is not installed") from exc
+    if windows_tesseract():
+        pytesseract.pytesseract.tesseract_cmd = windows_tesseract()
     try:
         return pytesseract.image_to_data(img, config=f"--psm {psm}", output_type=Output.DICT)
     except pytesseract.TesseractNotFoundError as exc:

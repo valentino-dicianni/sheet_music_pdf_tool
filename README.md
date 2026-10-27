@@ -56,6 +56,18 @@ The HTTP Bot API refuses to hand a bot more than 20 MB per file ("File is too bi
 Results come back the same way in reverse: a ZIP of the parts, or, above 50 MB, several ZIPs (`Title (1 of 3).zip` …); a single
 file that is itself over 50 MB arrives as `.zip.001`, `.zip.002`, … volumes that 7-Zip / `unzip` join again.
 
+## Packaging the desktop app
+`build_app.py` freezes the app with cx_Freeze (in its own `build/venv`) and packages it for the platform it runs on:
+
+* **Linux** (Debian / Ubuntu): `python3 build_app.py` → `dist/sheetmusic-tools_<version>_<arch>.deb`.
+  Install with `sudo apt install ./dist/sheetmusic-tools_*.deb` (pulls in `tesseract-ocr`), start from the app menu or
+  with `sheetmusic-tools`. The package targets the distribution release it was built on.
+* **Windows**: `py build_app.py` → `dist\SheetMusicTools-<version>-setup.exe` with [Inno Setup 6](https://jrsoftware.org/isinfo.php)
+  installed, a portable `.zip` otherwise. An installed [Tesseract](https://github.com/UB-Mannheim/tesseract/wiki)
+  (`C:\Program Files\Tesseract-OCR`, or set `TESSERACT_DIR`) is bundled into the app, so users need nothing else.
+
+The icon is `sheetmusic/gui/icon.png`, cut out of `assets/pdf_icon.jpg`.
+
 ## Command line
 ```bash
 python -m sheetmusic parts set.pdf --dry-run     # show the detected parts
